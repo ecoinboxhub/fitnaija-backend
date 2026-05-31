@@ -1,0 +1,30 @@
+# Python environment
+venv/
+.env
+.env.*
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# SQLite database files
+*.db
+fitnaija.db
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+
+# IDE/editor directories
+.vscode/
+.idea/
+
+# Python testing
+.pytest_cache/
+
+# OS
+.DS_Store
+Thumbs.db
