@@ -25,27 +25,50 @@ from sqlalchemy.orm import Session, declarative_base, relationship, sessionmaker
 
 load_dotenv()
 
+DEFAULT_SQLITE_URL = "sqlite:///./fitnaija.db"
+DEFAULT_ALLOWED_ORIGINS = [
+    "https://fitnaija-frontend.vercel.app",
+    "http://localhost:5173",
+    "http://localhost:3000",
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:3000",
+    "http://localhost:8000",
+]
+
 raw_database_url = os.getenv("DATABASE_URL", "").strip()
-if raw_database_url and ("<" in raw_database_url or ">" in raw_database_url or "password" in raw_database_url or "<port>" in raw_database_url):
+PLACEHOLDER_MARKERS = ("<", ">", "your-", "example", "placeholder", "password")
+if raw_database_url and any(marker in raw_database_url for marker in PLACEHOLDER_MARKERS):
     print("[WARNING] Invalid DATABASE_URL detected in environment variables. Falling back to local sqlite for startup.")
-    DATABASE_URL = "sqlite:///./fitnaija.db"
+    DATABASE_URL = DEFAULT_SQLITE_URL
 else:
-    DATABASE_URL = raw_database_url or "sqlite:///./fitnaija.db"
+    DATABASE_URL = raw_database_url or DEFAULT_SQLITE_URL
 
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "replace-with-a-strong-secret")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "120"))
-BACKEND_ALLOWED_ORIGINS = [origin.strip() for origin in os.getenv(
-    "BACKEND_ALLOWED_ORIGINS",
-    "http://localhost:5173,http://localhost:8000"
-).split(",") if origin.strip()]
+BACKEND_ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("BACKEND_ALLOWED_ORIGINS", ",".join(DEFAULT_ALLOWED_ORIGINS)).split(",")
+    if origin.strip()
+]
 
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
-engine = create_engine(DATABASE_URL, connect_args=connect_args)
+engine = create_engine(DATABASE_URL, connect_args=connect_args, pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 Base = declarative_base()
 security = HTTPBearer()
 app = FastAPI(title="FitNaija API", version="1.0.0")
+
+
+def _fallback_to_sqlite() -> None:
+    global DATABASE_URL, engine, SessionLocal
+    if DATABASE_URL == DEFAULT_SQLITE_URL:
+        return
+
+    print("[WARNING] Falling back to sqlite database for startup because the configured database is unavailable.")
+    DATABASE_URL = DEFAULT_SQLITE_URL
+    engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False}, pool_pre_ping=True)
+    SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
 app.add_middleware(
     CORSMiddleware,
@@ -355,6 +378,19 @@ def migrate_sqlite_schema(engine):
 
     inspector = inspect(engine)
     with engine.begin() as conn:
+        if "otps" in inspector.get_table_names():
+            otp_cols = [col["name"] for col in inspector.get_columns("otps")]
+            if "code_hash" not in otp_cols and "otp_code" in otp_cols:
+                conn.execute(text("ALTER TABLE otps RENAME COLUMN otp_code TO code_hash"))
+            if "code_hash" not in otp_cols and "otp_code" not in otp_cols:
+                conn.execute(text("ALTER TABLE otps ADD COLUMN code_hash VARCHAR"))
+            if "created_at" not in otp_cols:
+                conn.execute(text("ALTER TABLE otps ADD COLUMN created_at DATETIME"))
+            if "expires_at" not in otp_cols:
+                conn.execute(text("ALTER TABLE otps ADD COLUMN expires_at DATETIME"))
+            if "verified" not in otp_cols:
+                conn.execute(text("ALTER TABLE otps ADD COLUMN verified BOOLEAN DEFAULT 0"))
+
         if "challenges" in inspector.get_table_names():
             challenge_cols = [col["name"] for col in inspector.get_columns("challenges")]
             if "activity_type" not in challenge_cols:
@@ -419,6 +455,13 @@ def seed_challenges(db: Session) -> None:
 
 @app.on_event("startup")
 def on_startup() -> None:
+    try:
+        with engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+    except Exception as exc:
+        print(f"[WARNING] Database connectivity check failed: {exc}")
+        _fallback_to_sqlite()
+
     Base.metadata.create_all(bind=engine)
     migrate_sqlite_schema(engine)
     with SessionLocal() as db:
